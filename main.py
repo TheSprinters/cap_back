@@ -26,11 +26,13 @@ from api.classroom_api import classroom_api
 from api.data_export_import_api import data_export_import_api
 from hacks.joke import joke_api  # Import the joke API blueprint
 from api.post import post_api  # Import the social media post API
+from api.sheriff import sheriff_api  # Import the sheriff API
 #from api.announcement import announcement_api ##temporary revert
 
 # database Initialization functions
 from model.user import User, initUsers
-from model.user import Section;
+from model.user import Section
+from model.sheriff import Sheriff, initSheriffs
 from model.github import GitHubUser
 from model.feedback import Feedback
 from api.analytics import get_date_range
@@ -79,6 +81,7 @@ app.register_blueprint(feedback_api)
 app.register_blueprint(data_export_import_api)  # Register the data export/import API
 app.register_blueprint(joke_api)  # Register the joke API blueprint
 app.register_blueprint(post_api)  # Register the social media post API
+app.register_blueprint(sheriff_api)  # Register the sheriff API
 # app.register_blueprint(announcement_api) ##temporary revert
 
 # Jokes file initialization
@@ -315,6 +318,7 @@ custom_cli = AppGroup('custom', help='Custom commands')
 @custom_cli.command('generate_data')
 def generate_data():
     initUsers()
+    initSheriffs()
     initMicroblogs()
     initPersonas()
     initPersonaUsers()
