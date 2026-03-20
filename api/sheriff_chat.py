@@ -117,21 +117,33 @@ GUIDELINES:
 - Be supportive and respectful of law enforcement personnel"""
 
 
-@sheriff_chat_api.route('/sheriff/chat', methods=['POST'])
-def sheriff_chat():
-    body = request.get_json()
+def validate_chat_request(body):
+    """Validate the request body and extract message and history.
+
+    Returns:
+        tuple: (user_message, history) if valid.
+
+    Raises:
+        ValueError: If the request body is missing or has no message.
+    """
     if not body or not body.get('message'):
-        return jsonify({'error': 'Message is required'}), 400
-
-    api_key = app.config.get('CLAUDE_API_KEY')
-    if not api_key:
-        return jsonify({'error': 'Claude API key not configured'}), 500
-
+        raise ValueError('Message is required')
     user_message = body['message']
     # Support conversation history from frontend
     history = body.get('history', [])
+    return user_message, history
 
-    # Build messages array
+
+def build_message_history(history, user_message):
+    """Build the messages array from conversation history and the new user message.
+
+    Args:
+        history: List of previous message dicts with 'role' and 'content'.
+        user_message: The current user message string.
+
+    Returns:
+        list: Messages array formatted for the Claude API.
+    """
     messages = []
     for msg in history[-10:]:  # Keep last 10 messages for context
         messages.append({
@@ -139,31 +151,72 @@ def sheriff_chat():
             "content": msg.get("content", "")
         })
     messages.append({"role": "user", "content": user_message})
+    return messages
+
+
+def call_claude_api(api_key, messages):
+    """Make the HTTP call to the Claude API.
+
+    Args:
+        api_key: The Anthropic API key.
+        messages: The messages array to send.
+
+    Returns:
+        requests.Response: The raw HTTP response from Claude.
+    """
+    return requests.post(
+        CLAUDE_API_URL,
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 512,
+            "system": SYSTEM_PROMPT,
+            "messages": messages,
+        },
+        timeout=30,
+    )
+
+
+def parse_claude_response(response):
+    """Extract the reply text from a Claude API response.
+
+    Args:
+        response: The raw HTTP response from Claude.
+
+    Returns:
+        str: The assistant's reply text.
+    """
+    data = response.json()
+    return data["content"][0]["text"]
+
+
+@sheriff_chat_api.route('/sheriff/chat', methods=['POST'])
+def sheriff_chat():
+    body = request.get_json()
+    try:
+        user_message, history = validate_chat_request(body)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+    api_key = app.config.get('CLAUDE_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'Claude API key not configured'}), 500
+
+    messages = build_message_history(history, user_message)
 
     try:
-        response = requests.post(
-            CLAUDE_API_URL,
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 512,
-                "system": SYSTEM_PROMPT,
-                "messages": messages,
-            },
-            timeout=30,
-        )
+        response = call_claude_api(api_key, messages)
 
         if response.status_code != 200:
             error_detail = response.text
             print(f"Claude API error: {response.status_code} - {error_detail}")
             return jsonify({'error': 'AI service error', 'detail': error_detail}), 502
 
-        data = response.json()
-        reply = data["content"][0]["text"]
+        reply = parse_claude_response(response)
         return jsonify({'reply': reply})
 
     except requests.Timeout:

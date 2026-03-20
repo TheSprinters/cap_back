@@ -12,6 +12,91 @@ sheriff_api = Blueprint('sheriff_api', __name__, url_prefix='/api')
 api = Api(sheriff_api)
 
 
+def decode_sheriff_token():
+    """Read jwt_sheriff cookie, decode it, and return the Sheriff object.
+
+    Returns the Sheriff object or raises an appropriate error tuple.
+    """
+    token = request.cookies.get("jwt_sheriff")
+    if not token:
+        raise AuthError({'message': 'Not authenticated'}, 401)
+    try:
+        data = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise AuthError({'message': 'Token expired'}, 401)
+    except jwt.InvalidTokenError:
+        raise AuthError({'message': 'Invalid token'}, 401)
+    sheriff = Sheriff.query.filter_by(_uid=data["_uid"]).first()
+    if not sheriff:
+        raise AuthError({'message': 'Sheriff not found'}, 404)
+    return sheriff
+
+
+def require_admin():
+    """Decode token and verify the sheriff is an admin.
+
+    Returns the Sheriff object or raises 403 if not admin.
+    """
+    sheriff = decode_sheriff_token()
+    if not sheriff.is_admin():
+        raise AuthError({'message': 'Admin access required'}, 403)
+    return sheriff
+
+
+def set_sheriff_cookie(response, token, max_age):
+    """Set the jwt_sheriff cookie with production or dev settings."""
+    is_production = os.environ.get('IS_PRODUCTION', 'false').lower() == 'true'
+    cookie_name = "jwt_sheriff"
+    if is_production:
+        response.set_cookie(cookie_name, token, max_age=max_age,
+                            secure=True, httponly=True, path='/',
+                            samesite='None', domain='.opencodingsociety.com')
+    else:
+        response.set_cookie(cookie_name, token, max_age=max_age,
+                            secure=False, httponly=False, path='/',
+                            samesite='Lax')
+    return response
+
+
+def validate_signup_data(body):
+    """Validate name, uid, sheriff_id, password from the request body.
+
+    Returns a validated dict or raises an error tuple.
+    """
+    if not body:
+        raise AuthError({'message': 'No data provided'}, 400)
+
+    name = body.get('name')
+    if not name or len(name) < 2:
+        raise AuthError({'message': 'Name is missing or too short'}, 400)
+
+    uid = body.get('uid')
+    if not uid or len(uid) < 2:
+        raise AuthError({'message': 'Username is missing or too short'}, 400)
+
+    sheriff_id = body.get('sheriff_id')
+    if not sheriff_id:
+        raise AuthError({'message': 'Sheriff ID / Badge Number is required'}, 400)
+
+    password = body.get('password', 'sheriff123')
+    if len(password) < 8:
+        raise AuthError({'message': 'Password must be at least 8 characters'}, 400)
+
+    return {
+        'name': name,
+        'uid': uid,
+        'sheriff_id': sheriff_id,
+        'password': password,
+    }
+
+
+class AuthError(Exception):
+    """Simple exception to carry an error response tuple out of helpers."""
+    def __init__(self, body, status_code):
+        self.body = body
+        self.status_code = status_code
+
+
 class SheriffAPI:
 
     class _Authenticate(Resource):
@@ -39,7 +124,6 @@ class SheriffAPI:
                     algorithm="HS256"
                 )
 
-                is_production = os.environ.get('IS_PRODUCTION', 'false').lower() == 'true'
                 response_data = {
                     "message": f"Authentication for {sheriff._uid} successful",
                     "user": {
@@ -53,16 +137,7 @@ class SheriffAPI:
                     }
                 }
                 resp = jsonify(response_data)
-
-                cookie_name = "jwt_sheriff"
-                if is_production:
-                    resp.set_cookie(cookie_name, token, max_age=43200,
-                                    secure=True, httponly=True, path='/',
-                                    samesite='None', domain='.opencodingsociety.com')
-                else:
-                    resp.set_cookie(cookie_name, token, max_age=43200,
-                                    secure=False, httponly=False, path='/',
-                                    samesite='Lax')
+                set_sheriff_cookie(resp, token, 43200)
                 return resp
 
             except Exception as e:
@@ -72,16 +147,7 @@ class SheriffAPI:
             """Logout - expire the sheriff cookie."""
             try:
                 resp = Response("Sheriff token invalidated")
-                is_production = os.environ.get('IS_PRODUCTION', 'false').lower() == 'true'
-                cookie_name = "jwt_sheriff"
-                if is_production:
-                    resp.set_cookie(cookie_name, '', max_age=0,
-                                    secure=True, httponly=True, path='/',
-                                    samesite='None', domain='.opencodingsociety.com')
-                else:
-                    resp.set_cookie(cookie_name, '', max_age=0,
-                                    secure=False, httponly=False, path='/',
-                                    samesite='Lax')
+                set_sheriff_cookie(resp, '', 0)
                 return resp
             except Exception as e:
                 return {'message': 'Failed to invalidate token', 'error': str(e)}, 500
@@ -89,50 +155,28 @@ class SheriffAPI:
     class _ID(Resource):
         """Get current sheriff from token."""
         def get(self):
-            token = request.cookies.get("jwt_sheriff")
-            if not token:
-                return {'message': 'Not authenticated'}, 401
             try:
-                data = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=["HS256"])
-                sheriff = Sheriff.query.filter_by(_uid=data["_uid"]).first()
-                if not sheriff:
-                    return {'message': 'Sheriff not found'}, 404
+                sheriff = decode_sheriff_token()
                 return jsonify(sheriff.read())
-            except jwt.ExpiredSignatureError:
-                return {'message': 'Token expired'}, 401
-            except jwt.InvalidTokenError:
-                return {'message': 'Invalid token'}, 401
+            except AuthError as e:
+                return e.body, e.status_code
 
     class _CRUD(Resource):
         """Sheriff user CRUD operations."""
 
         def post(self):
             """Create a new sheriff user (signup)."""
-            body = request.get_json()
-            if not body:
-                return {'message': 'No data provided'}, 400
-
-            name = body.get('name')
-            if not name or len(name) < 2:
-                return {'message': 'Name is missing or too short'}, 400
-
-            uid = body.get('uid')
-            if not uid or len(uid) < 2:
-                return {'message': 'Username is missing or too short'}, 400
-
-            sheriff_id = body.get('sheriff_id')
-            if not sheriff_id:
-                return {'message': 'Sheriff ID / Badge Number is required'}, 400
-
-            password = body.get('password', 'sheriff123')
-            if len(password) < 8:
-                return {'message': 'Password must be at least 8 characters'}, 400
+            try:
+                body = request.get_json()
+                validated = validate_signup_data(body)
+            except AuthError as e:
+                return e.body, e.status_code
 
             sheriff = Sheriff(
-                name=name,
-                uid=uid,
-                sheriff_id=sheriff_id,
-                password=password,
+                name=validated['name'],
+                uid=validated['uid'],
+                sheriff_id=validated['sheriff_id'],
+                password=validated['password'],
                 email=body.get('email', ''),
                 rank=body.get('rank', 'Deputy'),
                 station=body.get('station', 'San Diego Central'),
@@ -149,75 +193,50 @@ class SheriffAPI:
 
         def get(self):
             """Get all sheriff users (admin only)."""
-            token = request.cookies.get("jwt_sheriff")
-            if not token:
-                return {'message': 'Not authenticated'}, 401
             try:
-                data = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=["HS256"])
-                current_sheriff = Sheriff.query.filter_by(_uid=data["_uid"]).first()
-                if not current_sheriff:
-                    return {'message': 'Sheriff not found'}, 404
-                if not current_sheriff.is_admin():
-                    return {'message': 'Admin access required'}, 403
-
+                require_admin()
                 sheriffs = Sheriff.query.all()
                 return jsonify([s.read() for s in sheriffs])
-            except jwt.ExpiredSignatureError:
-                return {'message': 'Token expired'}, 401
-            except jwt.InvalidTokenError:
-                return {'message': 'Invalid token'}, 401
+            except AuthError as e:
+                return e.body, e.status_code
 
         def put(self):
             """Update sheriff user."""
-            token = request.cookies.get("jwt_sheriff")
-            if not token:
-                return {'message': 'Not authenticated'}, 401
             try:
-                data = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=["HS256"])
-                current_sheriff = Sheriff.query.filter_by(_uid=data["_uid"]).first()
-                if not current_sheriff:
-                    return {'message': 'Sheriff not found'}, 404
+                current_sheriff = decode_sheriff_token()
+            except AuthError as e:
+                return e.body, e.status_code
 
-                body = request.get_json()
-                # Admin can update anyone, members can only update themselves
-                if current_sheriff.is_admin() and body.get('uid'):
-                    target = Sheriff.query.filter_by(_uid=body['uid']).first()
-                    if not target:
-                        return {'message': 'Target sheriff not found'}, 404
-                else:
-                    target = current_sheriff
+            body = request.get_json()
+            # Admin can update anyone, members can only update themselves
+            if current_sheriff.is_admin() and body.get('uid'):
+                target = Sheriff.query.filter_by(_uid=body['uid']).first()
+                if not target:
+                    return {'message': 'Target sheriff not found'}, 404
+            else:
+                target = current_sheriff
 
-                target.update(body)
-                return jsonify(target.read())
-            except jwt.ExpiredSignatureError:
-                return {'message': 'Token expired'}, 401
-            except jwt.InvalidTokenError:
-                return {'message': 'Invalid token'}, 401
+            target.update(body)
+            return jsonify(target.read())
 
         def delete(self):
             """Delete sheriff user (admin only)."""
-            token = request.cookies.get("jwt_sheriff")
-            if not token:
-                return {'message': 'Not authenticated'}, 401
             try:
-                data = jwt.decode(token, current_app.config["SECRET_KEY"], algorithms=["HS256"])
-                current_sheriff = Sheriff.query.filter_by(_uid=data["_uid"]).first()
+                current_sheriff = decode_sheriff_token()
                 if not current_sheriff or not current_sheriff.is_admin():
                     return {'message': 'Admin access required'}, 403
+            except AuthError as e:
+                return e.body, e.status_code
 
-                body = request.get_json()
-                uid = body.get('uid')
-                target = Sheriff.query.filter_by(_uid=uid).first()
-                if not target:
-                    return {'message': f'Sheriff {uid} not found'}, 404
+            body = request.get_json()
+            uid = body.get('uid')
+            target = Sheriff.query.filter_by(_uid=uid).first()
+            if not target:
+                return {'message': f'Sheriff {uid} not found'}, 404
 
-                target_data = target.read()
-                target.delete()
-                return jsonify({'message': f'Deleted sheriff: {target_data["name"]}'}), 200
-            except jwt.ExpiredSignatureError:
-                return {'message': 'Token expired'}, 401
-            except jwt.InvalidTokenError:
-                return {'message': 'Invalid token'}, 401
+            target_data = target.read()
+            target.delete()
+            return jsonify({'message': f'Deleted sheriff: {target_data["name"]}'}), 200
 
     # Register endpoints
     api.add_resource(_Authenticate, '/sheriff/authenticate')
